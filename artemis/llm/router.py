@@ -22,6 +22,7 @@ Anthropic, OpenRouter, and local Ollama/vLLM endpoints.
 from enum import StrEnum
 import hashlib
 import os
+import re
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -40,6 +41,7 @@ class ModelProvider(StrEnum):
     VERTEX_AI = "vertexai"
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
+    CLAUDE_CODE = "claude_code"
     OPENROUTER = "openrouter"
     XAI = "xai"
     OLLAMA = "ollama"
@@ -69,6 +71,8 @@ class ModelProvider(StrEnum):
             "openai": cls.OPENAI,
             "anthropic": cls.ANTHROPIC,
             "claude": cls.ANTHROPIC,
+            "claudecode": cls.CLAUDE_CODE,
+            "claudecli": cls.CLAUDE_CODE,
             "openrouter": cls.OPENROUTER,
             "xai": cls.XAI,
             "grok": cls.XAI,
@@ -195,6 +199,36 @@ def _patch_langchain_google_genai():
         logger.warning(f"Could not patch ChatGoogleGenerativeAI._process_tool_config: {e}")
 
 
+_CLAUDE_VERSION_RE = re.compile(
+    r"claude-(?:(\d+)-(\d+)|(?:opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2})(?!\d))?)"
+)
+
+_ANTHROPIC_EFFORTS = {
+    "none": "low",
+    "minimal": "low",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max",
+}
+
+
+def _anthropic_uses_budget_tokens(model_name: str) -> bool:
+    """True for Claude models older than 4.6 (sampling params + budget_tokens thinking)."""
+    match = _CLAUDE_VERSION_RE.search(model_name.lower())
+    if not match:
+        return False
+    major = int(match.group(1) or match.group(3))
+    minor = int(match.group(2) or match.group(4) or 0)
+    return (major, minor) < (4, 6)
+
+
+def _anthropic_effort(level: str | None) -> str | None:
+    """Maps a thinking_level / reasoning_effort onto Claude's output_config.effort."""
+    return _ANTHROPIC_EFFORTS.get(level.lower()) if level else None
+
+
 class ModelFactory:
     """Unified factory for instantiating and caching LangChain chat models across providers."""
 
@@ -317,18 +351,38 @@ class ModelFactory:
             )
             kwargs = {
                 "model": endpoint.model_name,
-                "temperature": endpoint.temperature,
                 "api_key": api_key,
                 "timeout": endpoint.timeout_seconds,
+                "max_tokens": endpoint.max_tokens,
             }
-            budget = endpoint.thinking_budget
-            if not budget and endpoint.reasoning_effort:
-                effort_map = {"low": 2048, "medium": 8192, "high": 32768}
-                budget = effort_map.get(endpoint.reasoning_effort.lower())
-            if budget:
-                kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
-                kwargs["temperature"] = 1.0
+            if _anthropic_uses_budget_tokens(endpoint.model_name):
+                kwargs["temperature"] = endpoint.temperature
+                budget = endpoint.thinking_budget
+                if not budget and endpoint.reasoning_effort:
+                    effort_map = {"low": 2048, "medium": 8192, "high": 32768}
+                    budget = effort_map.get(endpoint.reasoning_effort.lower())
+                if budget:
+                    kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+                    kwargs["temperature"] = 1.0
+            else:
+                # Claude 4.6+ rejects sampling params and budget_tokens: depth
+                # is set by output_config.effort with adaptive thinking.
+                kwargs["reasoning_effort"] = _anthropic_effort(
+                    endpoint.reasoning_effort or endpoint.thinking_level
+                )
+                # langchain falls back to 4096 for models missing from its
+                # profile table, too small once thinking shares the budget.
+                kwargs["max_tokens"] = endpoint.max_tokens or 16000
             return ChatAnthropic(**{k: v for k, v in kwargs.items() if v is not None})
+
+        elif provider == ModelProvider.CLAUDE_CODE:
+            from artemis.llm.claude_code import ChatClaudeCode
+
+            return ChatClaudeCode(
+                model=endpoint.model_name,
+                effort=_anthropic_effort(endpoint.reasoning_effort or endpoint.thinking_level),
+                timeout=endpoint.timeout_seconds,
+            )
 
         elif provider == ModelProvider.OPENROUTER:
             from langchain_openai import ChatOpenAI

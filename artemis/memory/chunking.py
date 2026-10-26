@@ -46,6 +46,7 @@ from uuid import uuid4
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from artemis.llm.google import is_google_provider
+from artemis.llm.router import ModelProvider
 from artemis.memory.step_memory import JobKey, StepLens, StepMemoryService
 from artemis.memory.transcript import format_session_offset
 from third_party.mobile_use.utils.logger import get_logger
@@ -323,18 +324,16 @@ class StepCapsuleLens(StepLens):
 
     def _get_llm(self):
         if self._llm is None:
-            from artemis.services.llm import get_google_llm
+            from artemis.services.llm import get_llm_for_model
 
-            self._llm = get_google_llm(model_name=self._model_name, temperature=0.0)
+            self._llm = get_llm_for_model(self._model_name, temperature=0.0)
         return self._llm
 
     def _get_fallback_llm(self):
         if self._fallback_llm is None and self._fallback_model_name:
-            from artemis.services.llm import get_google_llm
+            from artemis.services.llm import get_llm_for_model
 
-            self._fallback_llm = get_google_llm(
-                model_name=self._fallback_model_name, temperature=0.0
-            )
+            self._fallback_llm = get_llm_for_model(self._fallback_model_name, temperature=0.0)
         return self._fallback_llm
 
     @property
@@ -953,8 +952,9 @@ class HistoryChunkManager:
         """Fallback model for capsule generation when `chunking.model` is down.
 
         Resolved from the LLM config's summarizer role (which inherits the
-        global default fallback unless overridden). Only same-provider (google)
-        fallbacks apply — the capsule lens rides the raw google model path.
+        global default fallback unless overridden). Only a fallback of the
+        capsule model's own provider (google, anthropic or claude_code) applies —
+        the capsule lens rides the raw model path inferred from the model name.
         """
         try:
             llm_cfg = getattr(ctx, "llm_config", None) if ctx is not None else None
@@ -965,7 +965,18 @@ class HistoryChunkManager:
             fallback = getattr(getattr(llm_cfg, "summarizer", None), "fallback", None)
             provider = str(getattr(fallback, "provider", "") or "")
             model = getattr(fallback, "model", None)
-            if model and is_google_provider(provider) and model != self._model_name:
+            capsule_model = str(self._model_name).lower()
+            if capsule_model.startswith(("claude_code/", "claude-code/")):
+                if ModelProvider.from_string(provider) == ModelProvider.CLAUDE_CODE:
+                    model = f"claude_code/{model}" if model else model
+                else:
+                    model = None
+            elif capsule_model.startswith("claude"):
+                if ModelProvider.from_string(provider) != ModelProvider.ANTHROPIC:
+                    model = None
+            elif not is_google_provider(provider):
+                model = None
+            if model and model != self._model_name:
                 return str(model)
         except Exception as exc:
             logger.debug(f"Capsule fallback model resolution skipped: {exc}", exc_info=True)
