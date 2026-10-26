@@ -42,7 +42,7 @@ from artemis.config import (
 )
 from artemis.context import ArtemisContext
 from artemis.data_engine.trace import CURRENT_TRACE_ID, DataEngineCallbackHandler
-from artemis.llm.google import is_google_chat_model, is_google_provider
+from artemis.llm.google import is_google_chat_model, is_google_provider, strip_provider_prefix
 from artemis.llm.reliability import (
     CircuitBreaker,
     FailureCategory,
@@ -889,6 +889,31 @@ def get_google_llm(
         thinking_level=thinking_level,
         include_thoughts=include_thoughts,
         enable_grounding=enable_grounding,
+    )
+    return ModelFactory.create_model(ep)
+
+
+def get_llm_for_model(model_name: str, temperature: float | None = None) -> BaseChatModel:
+    """Builds a chat model from a bare model name, inferring the provider.
+
+    Lets config knobs that only take a model name (``step_summarizer.model``,
+    ``chunking.model``) point at Claude instead of always resolving to Gemini.
+    A ``claude_code/`` prefix routes through the local Claude Code CLI
+    (subscription billing); a bare ``claude-*`` name uses the Anthropic API.
+    """
+    name = strip_provider_prefix(model_name)
+    prefix = str(model_name).rsplit("/", 1)[0] if "/" in str(model_name) else ""
+    if prefix and ModelProvider.from_string(prefix) == ModelProvider.CLAUDE_CODE:
+        provider = ModelProvider.CLAUDE_CODE
+    elif name.lower().startswith("claude"):
+        provider = ModelProvider.ANTHROPIC
+    else:
+        return get_google_llm(model_name=model_name, temperature=temperature)
+    ep = ModelEndpoint(
+        provider=provider,
+        model_name=name,
+        temperature=temperature or 0.0,
+        reasoning_effort="low",
     )
     return ModelFactory.create_model(ep)
 

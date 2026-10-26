@@ -182,6 +182,24 @@ def _expand_default_into_nodes(config_dict: dict) -> dict:
                     node_cfg[k] = v
         result[node] = node_cfg
 
+    # Optional nodes keep their own defaults (see LLMConfig.get_agent) unless
+    # the config names them; then they inherit 'default' like the rest.
+    for node in (
+        "history_analyzer",
+        "validator_pixel_safety_net",
+        "planner_validation",
+        "output_analyzer",
+    ):
+        if node not in nodes_override:
+            continue
+        node_cfg = dict(default_model_cfg)
+        for k, v in nodes_override[node].items():
+            if isinstance(v, dict) and isinstance(node_cfg.get(k), dict):
+                node_cfg[k] = {**node_cfg[k], **v}
+            else:
+                node_cfg[k] = v
+        result[node] = node_cfg
+
     utils_dict: dict[str, Any] = {}
     for util in all_utils_nodes:
         util_cfg = dict(default_model_cfg)

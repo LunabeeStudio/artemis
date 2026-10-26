@@ -6,13 +6,22 @@
   // ------------------------------------------------------------------------------
   // 1. Global Default Model (Applied to all sub-agents unless overridden below)
   // ------------------------------------------------------------------------------
+  // Claude-only setup: Sonnet 5.5 by default, Opus 5.5 on the reasoning-heavy
+  // nodes, Haiku 5.5 on the lightweight ones. thinking_level maps to Claude's
+  // effort (minimal -> low).
+  // Provider "claude_code" runs every call through the local `claude -p` CLI,
+  // billed to the logged-in claude.ai subscription (5-hour / weekly limits
+  // apply; calls fail with a rate limit until the window resets). Use
+  // "anthropic" instead to bill API credits with ANTHROPIC_API_KEY.
+  // Model-name-only knobs (step_summarizer, chunking) take a "claude_code/" prefix.
   "default": {
-    "provider": "google",
-    "model": "gemini-3.8-flash",
+    "provider": "claude_code",
+    "model": "claude-sonnet-5-5",
     "thinking_level": "medium",
+    "timeout": 120,
     "fallback": {
-      "provider": "google",
-      "model": "gemini-3.7-flash",
+      "provider": "claude_code",
+      "model": "claude-sonnet-5",
       "thinking_level": "medium"
     }
   },
@@ -21,6 +30,21 @@
   // 2. Ready-to-Use Presets (Switch easily in code or CLI)
   // ------------------------------------------------------------------------------
   "presets": {
+    "claude-code": {
+      "provider": "claude_code",
+      "model": "claude-sonnet-5-5",
+      "fallback": { "provider": "claude_code", "model": "claude-sonnet-5" }
+    },
+    "claude-sonnet": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "fallback": { "provider": "anthropic", "model": "claude-sonnet-5" }
+    },
+    "claude-opus": {
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "fallback": { "provider": "anthropic", "model": "claude-opus-5" }
+    },
     "gemini-flagship": {
       "provider": "google",
       "model": "gemini-3.8-flash",
@@ -54,7 +78,14 @@
   "nodes": {
     // 🧠 Planner: High-level goal decomposition and strategic step planning
     "planner": {
-      "thinking_level": "high"
+      "model": "claude-opus-5-5",
+      "thinking_level": "high",
+      "timeout": 180,
+      "fallback": {
+        "provider": "claude_code",
+        "model": "claude-opus-5",
+        "thinking_level": "high"
+      }
     },
 
     // 🎯 Operator: Screen perception, element interaction, and direct execution
@@ -74,11 +105,16 @@
     // CRITICAL REQUIREMENT: Standard LLMs (including standard Gemini Flash, GPT-4o, Claude 3.7) lack sub-pixel spatial coordinate fine-tuning.
     // To achieve accurate [x, y] point and bounding box localization, this node MUST use specialized Gemini ER (Embodied Reasoning / Robotics) models:
     // e.g., "gemini-robotics-er-2-preview". Non-ER models will fail spatial coordinate detection.
+    // Claude-only setup: no Google key, so this runs on Claude Opus 5.5 and
+    // coordinate grounding is degraded. To restore it, set GEMINI_API_KEY and
+    // switch back to {"provider": "google", "model": "gemini-robotics-er-2-preview"}.
     "object_detector": {
-      "model": "gemini-robotics-er-2-preview",
+      "model": "claude-opus-5-5",
+      "thinking_level": "low",
       "fallback": {
-        "provider": "google",
-        "model": "gemini-robotics-er-2-preview"
+        "provider": "claude_code",
+        "model": "claude-sonnet-5-5",
+        "thinking_level": "low"
       }
     },
 
@@ -95,10 +131,12 @@
 
     // 🔽 Hopper: Fast lightweight package name locator
     "hopper": {
-      "model": "gemini-3.5-flash-lite",
+      "model": "claude-haiku-5-5",
+      "thinking_level": "low",
       "fallback": {
-        "provider": "google",
-        "model": "gemini-3.1-flash-lite"
+        "provider": "claude_code",
+        "model": "claude-sonnet-5-5",
+        "thinking_level": "low"
       }
     },
 
@@ -112,7 +150,13 @@
 
     // 🩺 Diagnoser Expert: Failure root cause diagnosis with search grounding
     "diagnoser_expert": {
-      "enable_grounding": true
+      "model": "claude-opus-5-5",
+      "enable_grounding": true, // Google Search grounding: ignored on Claude
+      "timeout": 180,
+      "fallback": {
+        "provider": "claude_code",
+        "model": "claude-opus-5"
+      }
     },
     // 🏛️ Committee Council Members
     "planner_avatar": {},
@@ -120,12 +164,38 @@
     // 🔎 Checker: Plan-declared checkpoint verification and exit final review.
     // Thoughts are streamed so the verifier's reasoning shows live in the timeline.
     "checker": {
+      "model": "claude-opus-5-5",
       "thinking_level": "medium",
-      "include_thoughts": true
-    }
+      "include_thoughts": true,
+      "timeout": 180,
+      "fallback": {
+        "provider": "claude_code",
+        "model": "claude-opus-5",
+        "thinking_level": "medium"
+      }
+    },
     // 🎯 Planner Validation: Advisory review of milestone changes.
-    // Defaults to the same lightweight model as the pixel safety net
-    // (gemini-3.5-flash-lite, temperature 0); add "planner_validation": {...} here to override.
+    // Without an entry here it defaults to the same lightweight model as the
+    // pixel safety net (gemini-3.5-flash-lite, temperature 0).
+    "planner_validation": {
+      "model": "claude-haiku-5-5",
+      "thinking_level": "low",
+      "fallback": {
+        "provider": "claude_code",
+        "model": "claude-sonnet-5-5",
+        "thinking_level": "low"
+      }
+    },
+    // 🛡️ Pixel Safety Net: pre-execution check of single actions (pixel fallback).
+    "validator_pixel_safety_net": {
+      "model": "claude-haiku-5-5",
+      "thinking_level": "low",
+      "fallback": {
+        "provider": "claude_code",
+        "model": "claude-sonnet-5-5",
+        "thinking_level": "low"
+      }
+    }
   },
 
   // ------------------------------------------------------------------------------
@@ -145,7 +215,7 @@
       // replacing images only after strictly objective, high-density summaries are ready.
       "step_summarizer": {
         "enabled": true, // Whether background step summarization is active
-        "model": "gemini-3.5-flash-lite", // Lightweight model for fast background inference
+        "model": "claude_code/claude-haiku-5-5", // Lightweight model for fast background inference
         "prune_history_xml": true // Prune outdated heavy XML trees from historical steps
       }
     },
@@ -246,7 +316,7 @@
         // call each); milestone closes are exempt, the hard line waives it.
         "min_steps": 3,
         "target_source_tokens": 2000,
-        "model": "gemini-3.8-flash",
+        "model": "claude_code/claude-haiku-5-5",
         "max_chunks": 8
         // "max_eras": 8 // independent era cap; omitted = follows max_chunks
       },

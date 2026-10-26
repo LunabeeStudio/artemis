@@ -62,18 +62,38 @@ async def test_planner_validation():
     assert get_llm.call_args.kwargs.get("name") == "planner_validation"
 
 
+def _llm_config(nodes: dict | None = None):
+    from artemis.config.llm import LLMConfig, _expand_default_into_nodes
+
+    default = {
+        "provider": "google",
+        "model": "gemini-3.8-flash",
+        "fallback": {"provider": "google", "model": "gemini-3.7-flash"},
+    }
+    return LLMConfig.model_validate(
+        _expand_default_into_nodes({"default": default, "nodes": nodes or {}})
+    )
+
+
 def test_planner_validation_node_defaults_to_lightweight_judge():
     """Unconfigured planner_validation resolves to the same flash-lite default
     as the pixel safety net (cheap, temperature 0)."""
-    from artemis.config import get_default_llm_config
-
-    llm_cfg = get_default_llm_config()
+    llm_cfg = _llm_config()
     node = llm_cfg.get_agent("planner_validation")
     safety_net = llm_cfg.get_agent("validator_pixel_safety_net")
     assert node.model == safety_net.model
     assert node.provider == safety_net.provider
     assert node.temperature == 0.0
     assert "lite" in node.model
+
+
+def test_configured_planner_validation_node_inherits_default():
+    """A planner_validation entry in 'nodes' is honored and inherits 'default'."""
+    llm_cfg = _llm_config({"planner_validation": {"model": "claude-haiku-5-5"}})
+    node = llm_cfg.get_agent("planner_validation")
+    assert (node.provider, node.model) == ("google", "claude-haiku-5-5")
+    assert node.fallback.model == "gemini-3.7-flash"
+    assert llm_cfg.get_agent("validator_pixel_safety_net").model == "gemini-3.5-flash-lite"
 
 
 if __name__ == "__main__":

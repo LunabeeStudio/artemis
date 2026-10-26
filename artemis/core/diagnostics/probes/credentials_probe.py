@@ -14,7 +14,9 @@
 
 """LLM & Multimodal Vision Credentials Readiness Probe."""
 
+import asyncio
 from typing import Any
+
 from artemis.config import settings
 from artemis.core.diagnostics.probes.base import BaseProbe
 from artemis.core.diagnostics.schema import (
@@ -23,6 +25,9 @@ from artemis.core.diagnostics.schema import (
     ProbeResult,
     ProbeStatus,
 )
+from third_party.mobile_use.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class LLMCredentialsProbe(BaseProbe):
@@ -60,6 +65,44 @@ class LLMCredentialsProbe(BaseProbe):
 
         configured_providers: list[dict[str, Any]] = []
         api_keys_map: dict[str, str] = {}
+        # claude_code runs on the local Claude Code login (subscription), not a
+        # key; listed first so it is the primary provider when configured.
+        try:
+            from artemis.config.llm import get_default_llm_config
+            from artemis.llm.claude_code import login_status, uses_claude_code
+
+            if uses_claude_code(get_default_llm_config()):
+                logged_in, detail = await asyncio.to_thread(login_status)
+                if logged_in:
+                    configured_providers.append(
+                        {
+                            "provider": "claude_code",
+                            "label": "Claude Code (subscription)",
+                            "masked": detail,
+                            "raw_key": "",
+                            "key": "",
+                        }
+                    )
+                else:
+                    return ProbeResult(
+                        id=self.probe_id,
+                        category=self.category,
+                        title="Multimodal LLM API Key",
+                        status=ProbeStatus.FAIL,
+                        is_blocker=self.is_blocker,
+                        summary="Claude Code not ready",
+                        description=f"The LLM config uses provider claude_code. {detail}.",
+                        metadata={"configured_count": 0, "providers": [], "api_keys": {}},
+                        actions=[
+                            ProbeAction(
+                                action_type="hint",
+                                label="Log in to Claude Code",
+                                payload="Run `claude auth login` with your claude.ai account.",
+                            )
+                        ],
+                    )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.debug(f"Claude Code credential check skipped: {exc}", exc_info=True)
         if gemini_key and not is_placeholder_key(gemini_key):
             g_val = gemini_key.get_secret_value()
             configured_providers.append(
@@ -163,7 +206,9 @@ class LLMCredentialsProbe(BaseProbe):
         }
 
         # Case 1: Gemini API Key configured (Standard / Recommended)
-        if gemini_key:
+        if gemini_key and not (
+            configured_providers and configured_providers[0]["provider"] == "claude_code"
+        ):
             masked = self._mask_key(gemini_key.get_secret_value())
             return ProbeResult(
                 id=self.probe_id,
